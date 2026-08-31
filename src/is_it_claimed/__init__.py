@@ -2,5 +2,5 @@
 
 from is_it_claimed.core import GitHubError, Signal, Verdict, check, parse_target
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = ["check", "parse_target", "Verdict", "Signal", "GitHubError", "__version__"]

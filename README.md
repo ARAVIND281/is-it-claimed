@@ -3,12 +3,12 @@
 Check whether a GitHub issue is already being worked on — **before** you write the patch.
 
 ```console
-$ is-it-claimed MakazhanAlpamys/Soup#606
+$ is-it-claimed owner/repo#606
 CLAIMED (high confidence)
-  MakazhanAlpamys/Soup#606  soup serve --backend mii hand-rolls its own prompt
+  owner/repo#606  serve backend hand-rolls its own prompt
 
-  ! @AmirF194 has an OPEN PR for this — fix(mii): apply the model's chat template
-    https://github.com/MakazhanAlpamys/Soup/pull/607
+  ! @contributor has an OPEN PR for this — fix: apply the model's chat template
+    https://github.com/owner/repo/pull/607
 ```
 
 No dependencies. Python 3.9+.
