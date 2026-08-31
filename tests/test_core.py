@@ -179,9 +179,28 @@ def test_a_closed_pr_is_weaker_than_an_open_one(monkeypatch):
     assert "since closed" in verdict.signals[0].detail
 
 
-def test_a_merged_pr_is_reported_as_merged(monkeypatch):
+def test_a_merged_pr_that_did_not_close_this_issue_is_only_a_note(monkeypatch):
+    """A cross-reference is created by any mention of the number. If a PR merged
+    and this issue is STILL OPEN, it mentioned the issue rather than fixing it —
+    reporting that as a claim sends people away from work that is free."""
     _routes(monkeypatch, timeline=[_crossref("someone", 5, state="closed", merged=True)])
-    assert "merged a PR" in core.check("o/r#1").signals[0].detail
+    verdict = core.check("o/r#1")  # issue itself is open
+    assert verdict.summary == "AVAILABLE"
+    assert verdict.claimed is False
+    assert verdict.signals[0].weight == 0
+    assert verdict.notes and "did not close it" in verdict.notes[0].detail
+
+
+def test_a_merged_pr_on_a_closed_issue_is_a_real_fix(monkeypatch):
+    """Same event, opposite meaning: the issue closed, so the PR resolved it."""
+    _routes(
+        monkeypatch,
+        issue=_issue(state="closed"),
+        timeline=[_crossref("someone", 5, state="closed", merged=True)],
+    )
+    verdict = core.check("o/r#1")
+    assert "merged a PR for this" in verdict.signals[0].detail
+    assert verdict.signals[0].weight == 4
 
 
 def test_signals_accumulate_into_confidence(monkeypatch):
@@ -317,3 +336,38 @@ def test_cli_exits_1_and_explains_for_a_pull_request(monkeypatch, capsys):
     _routes(monkeypatch, issue=issue)
     assert main(["o/r#1", "--no-colour"]) == 1
     assert "not an issue" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# token discovery
+# --------------------------------------------------------------------------
+def test_env_token_wins(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
+    assert core._token() == "env-token"
+
+
+def test_gh_cli_token_is_used_when_the_config_file_has_none(monkeypatch, tmp_path):
+    """On macOS gh keeps the token in the keychain, so hosts.yml has none.
+    Without asking gh itself, an authenticated user silently gets the 60/hour
+    anonymous limit and no explanation."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(core.os.path, "expanduser", lambda _p: str(tmp_path / "absent.yml"))
+
+    class _Done:
+        stdout = "gh-cli-token\n"
+
+    monkeypatch.setattr(core.subprocess, "run", lambda *a, **k: _Done())
+    assert core._token() == "gh-cli-token"
+
+
+def test_a_missing_gh_binary_is_not_an_error(monkeypatch, tmp_path):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(core.os.path, "expanduser", lambda _p: str(tmp_path / "absent.yml"))
+
+    def boom(*_a, **_k):
+        raise FileNotFoundError("gh not installed")
+
+    monkeypatch.setattr(core.subprocess, "run", boom)
+    assert core._token() is None

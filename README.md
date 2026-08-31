@@ -53,6 +53,50 @@ Exit codes make it scriptable — `0` available, `1` claimed, `2` error:
 is-it-claimed "$ISSUE" || { echo "someone is already on it"; exit 1; }
 ```
 
+## Sweeping a search
+
+The question is rarely "is this one issue free?". It is "of these forty, which
+can I take?" — so point it at a search instead:
+
+```console
+$ is-it-claimed --search 'label:"good first issue" no:assignee language:python' \
+                --available-only
+40 checked, 6 available, 34 claimed
+
+  AVAILABLE owner/repo#4421                  Improve error message on bad config
+  AVAILABLE other/project#5502               Docs: nested blueprint example
+  ...
+```
+
+Without `--available-only` it lists everything and says *why* each one is taken:
+
+```console
+$ is-it-claimed --search 'repo:owner/repo label:"good first issue"'
+4 checked, 1 available, 3 claimed
+
+  AVAILABLE owner/repo#273    Cover three uncovered branches
+  CLAIMED   owner/repo#276    Add ready-made recipe
+            @contributor has an OPEN PR for this — feat: add recipes
+```
+
+Several issues can also be given directly:
+
+```bash
+is-it-claimed owner/repo#1 owner/repo#2 other/repo#3
+```
+
+Sweeps run concurrently (`--workers`, default 6). In a sweep the exit code
+answers "is there anything here for me?" — `0` if at least one issue is
+available, `1` if none are.
+
+**It will not start a sweep it cannot finish.** Each issue costs about three API
+calls, so the remaining hourly quota is checked first; if it is short, the sweep
+is trimmed and says so rather than emitting forty identical rate-limit errors:
+
+```
+  ! only 40 requests left this hour; checked the first 8 of 20
+```
+
 ## What it checks
 
 | Signal | Weight | Why it matters |
@@ -71,13 +115,21 @@ is as close to certain as this gets.
 not a claim, and treating it as one would tell you an issue is taken when it is
 merely being discussed.
 
+**A mention is not a fix.** GitHub creates a cross-reference whenever a pull
+request mentions an issue number — including in passing. If such a PR *merged*
+and the issue is still open, it plainly did not resolve it, so it is reported as
+context rather than counted as a claim. Without that distinction the tool marks
+genuinely free issues as taken, which is the expensive direction to be wrong in.
+
 ## Authentication
 
 Optional, but recommended — unauthenticated GitHub allows 60 requests/hour, and
 `--forks` can spend that on one check.
 
-The token is picked up from `GITHUB_TOKEN`, `GH_TOKEN`, or the credentials the
-`gh` CLI already stores, so if you have `gh auth login` there is nothing to do.
+The token is picked up from `GITHUB_TOKEN`, `GH_TOKEN`, `~/.config/gh/hosts.yml`,
+or `gh auth token` — that last one matters on macOS, where `gh` keeps the token
+in the keychain and the config file has none. If you have run `gh auth login`
+there is nothing to do.
 
 ## Partial results
 

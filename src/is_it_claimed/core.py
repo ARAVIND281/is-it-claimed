@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -96,6 +97,11 @@ class Verdict:
         return self.score > 0
 
     @property
+    def notes(self) -> list[Signal]:
+        """Zero-weight findings: worth showing, not evidence of a claim."""
+        return [s for s in self.signals if s.weight == 0]
+
+    @property
     def confidence(self) -> str:
         """How sure we are, given that different signals carry different weight.
 
@@ -148,7 +154,23 @@ def _token() -> str | None:
                     return stripped.split(":", 1)[1].strip()
     except OSError:
         pass
-    return None
+
+    # On macOS (and with a keyring on Linux) gh keeps the token in the system
+    # credential store, so hosts.yml has none. Asking gh itself works whatever
+    # backend it chose — without this, a user with `gh auth login` still gets
+    # the 60/hour anonymous limit and no idea why.
+    try:
+        completed = subprocess.run(  # noqa: S603
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    token = completed.stdout.strip()
+    return token or None
 
 
 def _get(path: str, *, accept: str = "application/vnd.github+json") -> Any:
@@ -211,11 +233,19 @@ def _comment_signals(owner: str, repo: str, number: int) -> list[Signal]:
     return signals
 
 
-def _cross_reference_signals(owner: str, repo: str, number: int) -> list[Signal]:
+def _cross_reference_signals(
+    owner: str, repo: str, number: int, *, issue_state: str = "open"
+) -> list[Signal]:
     """PRs that reference this issue — the signal `gh issue view` does not show.
 
-    A PR mentioning the issue is the strongest evidence short of a merge: the
-    work is not merely intended, it exists.
+    A cross-reference is created by *any* mention of the issue number, not only
+    by a pull request that fixes it. Telling the two apart matters, because
+    reporting a passing mention as a claim sends people away from work that is
+    genuinely free.
+
+    The discriminator is cheap: **a merged PR that did not close the issue was
+    not a fix for it.** If the issue is still open, that merge referenced it in
+    passing, and the issue is if anything more likely to be available, not less.
     """
     events = _get(f"/repos/{owner}/{repo}/issues/{number}/timeline?per_page=100")
     signals = []
@@ -227,7 +257,11 @@ def _cross_reference_signals(owner: str, repo: str, number: int) -> list[Signal]
             continue  # another issue referencing this one is not a claim
         state = source.get("state", "?")
         merged = (source.get("pull_request") or {}).get("merged_at")
-        if merged:
+        if merged and issue_state == "open":
+            # Merged, yet this issue is still open: it mentioned the issue, it
+            # did not resolve it. Barely evidence of anything.
+            label, weight = "mentioned this in a merged PR (which did not close it)", 0
+        elif merged:
             label, weight = "merged a PR for this", 4
         elif state == "open":
             label, weight = "has an OPEN PR for this", 4
@@ -334,7 +368,9 @@ def check(
 
     for name, fetch in (
         ("comments", lambda: _comment_signals(owner, repo, number)),
-        ("linked PRs", lambda: _cross_reference_signals(owner, repo, number)),
+        ("linked PRs", lambda: _cross_reference_signals(
+            owner, repo, number, issue_state=verdict.state
+        )),
     ):
         try:
             verdict.signals.extend(fetch())
