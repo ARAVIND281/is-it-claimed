@@ -25,6 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 __all__ = ["Signal", "Verdict", "check", "parse_target", "GitHubError"]
@@ -214,27 +215,56 @@ def _assignee_signals(issue: dict) -> list[Signal]:
     ]
 
 
-def _comment_signals(owner: str, repo: str, number: int) -> list[Signal]:
+def _comment_signals(
+    owner: str, repo: str, number: int, *, stale_days: int = 90
+) -> list[Signal]:
+    """Comments in which somebody said they would take the issue.
+
+    A claim decays like any other. "I'll take this" said eight months ago, with
+    nothing since, is not a live claim — the same reasoning applied to abandoned
+    pull requests, and for the same reason: treating it as current keeps people
+    away from work that is in practice free again.
+    """
     comments = _get(f"/repos/{owner}/{repo}/issues/{number}/comments?per_page=100")
     signals = []
     for comment in comments:
         body = comment.get("body") or ""
-        if _CLAIM_RE.search(body):
-            snippet = " ".join(body.split())[:90]
-            signals.append(
-                Signal(
-                    kind="comment",
-                    detail=f'claimed it in a comment: "{snippet}"',
-                    url=comment.get("html_url"),
-                    actor=(comment.get("user") or {}).get("login"),
-                    weight=2,
-                )
+        if not _CLAIM_RE.search(body):
+            continue
+        snippet = " ".join(body.split())[:90]
+        age = _days_since(comment.get("created_at"))
+        if age is not None and age >= stale_days:
+            detail = f'claimed it {age} days ago and has not followed up: "{snippet}"'
+            weight = 1
+        else:
+            detail = f'claimed it in a comment: "{snippet}"'
+            weight = 2
+        signals.append(
+            Signal(
+                kind="comment",
+                detail=detail,
+                url=comment.get("html_url"),
+                actor=(comment.get("user") or {}).get("login"),
+                weight=weight,
             )
+        )
     return signals
 
 
+
+def _days_since(timestamp: str | None) -> int | None:
+    """Whole days between an ISO-8601 GitHub timestamp and now, or None."""
+    if not timestamp:
+        return None
+    try:
+        moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0, (datetime.now(timezone.utc) - moment).days)
+
+
 def _cross_reference_signals(
-    owner: str, repo: str, number: int, *, issue_state: str = "open"
+    owner: str, repo: str, number: int, *, issue_state: str = "open", stale_days: int = 90
 ) -> list[Signal]:
     """PRs that reference this issue — the signal `gh issue view` does not show.
 
@@ -257,6 +287,9 @@ def _cross_reference_signals(
             continue  # another issue referencing this one is not a claim
         state = source.get("state", "?")
         merged = (source.get("pull_request") or {}).get("merged_at")
+        draft = bool(source.get("draft"))
+        idle = _days_since(source.get("updated_at"))
+
         if merged and issue_state == "open":
             # Merged, yet this issue is still open: it mentioned the issue, it
             # did not resolve it. Barely evidence of anything.
@@ -265,6 +298,18 @@ def _cross_reference_signals(
             label, weight = "merged a PR for this", 4
         elif state == "open":
             label, weight = "has an OPEN PR for this", 4
+            # An open PR nobody has touched for months is not a live claim. The
+            # work may exist, but the person has moved on, and treating it the
+            # same as this morning's PR sends people away from issues that are
+            # in practice free again.
+            if idle is not None and idle >= stale_days:
+                label = f"has an open but STALE PR ({idle} days idle)"
+                weight = 1
+            if draft:
+                # A draft is explicitly "not ready for review" — weaker than a
+                # PR its author has put up for merging.
+                label += " [draft]"
+                weight = max(1, weight - 1)
         else:
             label, weight = "opened a PR for this (since closed)", 1
         signals.append(
@@ -334,6 +379,7 @@ def check(
     *,
     include_forks: bool = False,
     fork_limit: int = 30,
+    stale_days: int = 90,
 ) -> Verdict:
     """Decide whether ``target`` is already spoken for.
 
@@ -342,6 +388,8 @@ def check(
         include_forks: also scan recent forks for a branch naming the issue.
             Off by default — it costs one request per fork.
         fork_limit: how many recent forks to scan when ``include_forks``.
+        stale_days: an open PR untouched for this long is treated as a weak
+            signal rather than a live claim.
 
     Returns:
         A :class:`Verdict`. Checks that fail individually are recorded in
@@ -367,9 +415,9 @@ def check(
     verdict.checked.append("assignee")
 
     for name, fetch in (
-        ("comments", lambda: _comment_signals(owner, repo, number)),
+        ("comments", lambda: _comment_signals(owner, repo, number, stale_days=stale_days)),
         ("linked PRs", lambda: _cross_reference_signals(
-            owner, repo, number, issue_state=verdict.state
+            owner, repo, number, issue_state=verdict.state, stale_days=stale_days
         )),
     ):
         try:

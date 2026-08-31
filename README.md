@@ -115,6 +115,20 @@ is as close to certain as this gets.
 not a claim, and treating it as one would tell you an issue is taken when it is
 merely being discussed.
 
+**A claim goes stale.** An open PR nobody has touched in 90 days, or a comment
+saying "I'll take this" written eight months ago with no follow-up, is not a
+live claim — the work was intended, then abandoned. Both are downgraded to a
+weak signal and labelled with their age, so you can see it and judge. Tune the
+threshold with `--stale-days N`.
+
+```
+CLAIMED (low confidence)
+  ! @contributor has an open but STALE PR (240 days idle) — feat: add the thing
+```
+
+**A draft is weaker than a ready PR.** A draft says "not ready for review", so
+it scores below one its author has put up for merging.
+
 **A mention is not a fix.** GitHub creates a cross-reference whenever a pull
 request mentions an issue number — including in passing. If such a PR *merged*
 and the issue is still open, it plainly did not resolve it, so it is reported as

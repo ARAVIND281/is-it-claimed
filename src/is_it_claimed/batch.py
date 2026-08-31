@@ -88,6 +88,7 @@ def check_many(
     include_forks: bool = False,
     workers: int = 6,
     respect_rate_limit: bool = True,
+    stale_days: int = 90,
 ) -> BatchResult:
     """Check every target, concurrently.
 
@@ -117,7 +118,9 @@ def check_many(
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(check, target, include_forks=include_forks): target
+            pool.submit(
+                check, target, include_forks=include_forks, stale_days=stale_days
+            ): target
             for target in targets
         }
         for future in as_completed(futures):

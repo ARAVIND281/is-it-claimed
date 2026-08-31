@@ -148,6 +148,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--fork-limit", type=int, default=30, metavar="N",
         help="how many recent forks to scan with --forks (default 30)",
     )
+    parser.add_argument(
+        "--stale-days", type=int, default=90, metavar="N",
+        help=(
+            "an open PR untouched for N days counts as a weak signal, not a "
+            "live claim (default 90)"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--no-colour", action="store_true", help="disable colour")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -155,7 +162,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_single(args, colour: bool) -> int:
-    verdict = check(args.targets[0], include_forks=args.forks, fork_limit=args.fork_limit)
+    verdict = check(
+        args.targets[0],
+        include_forks=args.forks,
+        fork_limit=args.fork_limit,
+        stale_days=args.stale_days,
+    )
     if args.json:
         print(json.dumps(_verdict_payload(verdict), indent=2))
     else:
@@ -170,6 +182,7 @@ def _run_batch(args, targets: list[str], colour: bool) -> int:
         targets,
         include_forks=args.forks,
         workers=max(1, args.workers),
+        stale_days=args.stale_days,
     )
     if args.json:
         print(json.dumps({

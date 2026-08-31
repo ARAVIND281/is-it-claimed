@@ -88,11 +88,17 @@ def _issue(state="open", assignees=(), title="An issue"):
     }
 
 
-def _crossref(actor, number, *, is_pr=True, state="open", merged=False):
+def _crossref(actor, number, *, is_pr=True, state="open", merged=False,
+              idle_days=0, draft=False):
+    from datetime import datetime, timedelta, timezone
+
+    updated = datetime.now(timezone.utc) - timedelta(days=idle_days)
     source = {
         "state": state,
         "title": f"PR {number}",
         "html_url": f"https://github.com/o/r/pull/{number}",
+        "updated_at": updated.isoformat().replace("+00:00", "Z"),
+        "draft": draft,
     }
     if is_pr:
         source["pull_request"] = {"merged_at": "2026-01-01T00:00:00Z" if merged else None}
@@ -371,3 +377,88 @@ def test_a_missing_gh_binary_is_not_an_error(monkeypatch, tmp_path):
 
     monkeypatch.setattr(core.subprocess, "run", boom)
     assert core._token() is None
+
+
+# --------------------------------------------------------------------------
+# staleness and drafts
+# --------------------------------------------------------------------------
+def test_a_fresh_open_pr_is_a_strong_claim(monkeypatch):
+    _routes(monkeypatch, timeline=[_crossref("dev", 7, idle_days=2)])
+    verdict = core.check("o/r#1")
+    assert verdict.confidence == "high"
+    assert "STALE" not in verdict.signals[0].detail
+
+
+def test_an_abandoned_open_pr_is_downgraded(monkeypatch):
+    """An open PR nobody has touched for months is not a live claim. Scoring it
+    like this morning's PR keeps people away from work that is free again."""
+    _routes(monkeypatch, timeline=[_crossref("dev", 7, idle_days=240)])
+    verdict = core.check("o/r#1")
+    assert verdict.summary == "CLAIMED"       # still worth surfacing
+    assert verdict.confidence == "low"        # but not a blocker
+    assert "STALE" in verdict.signals[0].detail
+    assert "240 days idle" in verdict.signals[0].detail
+
+
+def test_the_staleness_threshold_is_configurable(monkeypatch):
+    _routes(monkeypatch, timeline=[_crossref("dev", 7, idle_days=40)])
+    assert core.check("o/r#1").confidence == "high"            # under 90 days
+    assert core.check("o/r#1", stale_days=30).confidence == "low"
+
+
+def test_a_draft_pr_is_a_weaker_signal_than_a_ready_one(monkeypatch):
+    """A draft says 'not ready for review' — a softer claim than one put up
+    for merging."""
+    _routes(monkeypatch, timeline=[_crossref("dev", 7, draft=True)])
+    verdict = core.check("o/r#1")
+    assert "[draft]" in verdict.signals[0].detail
+    assert verdict.signals[0].weight == 3     # 4 for a ready PR
+
+
+def test_a_stale_draft_is_the_weakest_open_pr(monkeypatch):
+    _routes(monkeypatch, timeline=[_crossref("dev", 7, idle_days=200, draft=True)])
+    verdict = core.check("o/r#1")
+    detail = verdict.signals[0].detail
+    assert "STALE" in detail and "[draft]" in detail
+    assert verdict.confidence == "low"
+
+
+def test_a_missing_updated_at_does_not_crash_the_check(monkeypatch):
+    event = _crossref("dev", 7)
+    del event["source"]["issue"]["updated_at"]
+    _routes(monkeypatch, timeline=[event])
+    assert core.check("o/r#1").confidence == "high"
+
+
+def test_a_malformed_timestamp_is_ignored_rather_than_fatal(monkeypatch):
+    event = _crossref("dev", 7)
+    event["source"]["issue"]["updated_at"] = "not-a-date"
+    _routes(monkeypatch, timeline=[event])
+    assert core.check("o/r#1").confidence == "high"
+
+
+def test_an_old_unfollowed_claim_comment_decays(monkeypatch):
+    """A claim comment is a promise, not work. One made eight months ago with
+    no follow-up is not a live claim."""
+    from datetime import datetime, timedelta, timezone
+
+    old = (datetime.now(timezone.utc) - timedelta(days=250)).isoformat().replace("+00:00", "Z")
+    _routes(monkeypatch, comments=[
+        {"body": "I'll take this", "user": {"login": "dev"}, "html_url": "u", "created_at": old},
+    ])
+    verdict = core.check("o/r#1")
+    assert verdict.confidence == "low"
+    assert "250 days ago and has not followed up" in verdict.signals[0].detail
+
+
+def test_a_recent_claim_comment_is_not_decayed(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    recent = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    _routes(monkeypatch, comments=[
+        {"body": "I'll take this", "user": {"login": "dev"}, "html_url": "u",
+         "created_at": recent},
+    ])
+    verdict = core.check("o/r#1")
+    assert verdict.signals[0].weight == 2
+    assert "has not followed up" not in verdict.signals[0].detail
